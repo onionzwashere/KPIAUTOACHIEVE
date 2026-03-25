@@ -1,6 +1,9 @@
 # Environment & credentials
 .env
 credentials.json
+*.json
+!package.json
+!package-lock.json
 
 # Python
 __pycache__/
