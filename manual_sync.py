@@ -6,6 +6,10 @@ Juga menyediakan utility untuk melihat boards, lists, dan cek sheet.
 import sys
 import argparse
 
+# Fix encoding for Windows console emojis
+if sys.stdout.encoding.lower() != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
+
 # Parse arguments dulu sebelum import config (untuk --help)
 parser = argparse.ArgumentParser(
     description="Sheets -> Trello Sync Bot - Manual Sync Tool",
