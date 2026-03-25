@@ -90,8 +90,15 @@ def check_sheet():
         print(f"  [OK] Berhasil terhubung!")
         print(f"  Header: {headers}")
 
+        # Tampilkan auto-detected columns
+        detected = google_sheets.get_detected_columns_info(target_sheet)
+        print(f"\n  [AUTO-DETECT] Kolom yang terdeteksi:")
+        for key, idx in detected.items():
+            col_letter = chr(ord('A') + idx)
+            print(f"    {key:10s} -> Kolom {col_letter} (index {idx})")
+
         tasks = google_sheets.get_task_data(target_sheet)
-        print(f"  Total task: {len(tasks)}")
+        print(f"\n  Total task: {len(tasks)}")
 
         unsynced = [t for t in tasks if not t["result"]]
         synced = [t for t in tasks if t["result"]]

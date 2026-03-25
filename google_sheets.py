@@ -1,7 +1,7 @@
 """
 Google Sheets Client — membaca dan update data dari spreadsheet.
 Menggunakan library gspread dengan Google Service Account.
-Mendukung hyperlink extraction dari kolom task title.
+Mendukung auto-detect kolom dan hyperlink extraction.
 """
 
 import re
@@ -16,6 +16,20 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.readonly",
 ]
+
+# Mapping nama header -> key internal (case-insensitive, partial match)
+# Urutan penting: dicek dari atas ke bawah
+COLUMN_MAPPINGS = {
+    "tanggal": "date",
+    "link": "title",       # Kolom "Link" berisi judul task + hyperlink
+    "sosmed": "sosmed",
+    "deadline": "deadline",
+    "result": "result",
+    "note": "note",
+}
+
+# Kolom yang diabaikan (tidak di-parse)
+IGNORED_COLUMNS = {"script"}
 
 
 def _get_client() -> gspread.Client:
@@ -38,13 +52,11 @@ def _get_worksheet(sheet_name: str = None) -> gspread.Worksheet:
     spreadsheet = _get_spreadsheet()
     target = sheet_name or config.SHEET_NAME
 
-    # Coba exact match dulu
     try:
         return spreadsheet.worksheet(target)
     except gspread.exceptions.WorksheetNotFound:
         pass
 
-    # Fuzzy match: cari sheet yang namanya cocok setelah di-strip
     target_clean = target.strip().lower()
     for ws in spreadsheet.worksheets():
         if ws.title.strip().lower() == target_clean:
@@ -60,13 +72,7 @@ def list_sheet_tabs() -> list[str]:
 
 
 def find_month_sheet(month_keyword: str) -> str | None:
-    """
-    Cari sheet tab yang mengandung keyword bulan tertentu (case-insensitive).
-    Contoh: find_month_sheet("februari") -> "Febuari 2026 "
-    
-    Returns:
-        Nama sheet yang ditemukan, atau None.
-    """
+    """Cari sheet tab yang mengandung keyword bulan (case-insensitive)."""
     tabs = list_sheet_tabs()
     keyword_lower = month_keyword.lower().strip()
     for tab in tabs:
@@ -75,22 +81,62 @@ def find_month_sheet(month_keyword: str) -> str | None:
     return None
 
 
+def detect_columns(header_row: list[str]) -> dict[str, int]:
+    """
+    Auto-detect posisi kolom berdasarkan nama header.
+    Hanya mendeteksi kolom Mahardika (sebelum kolom kedua kosong yang menandakan
+    pemisah antar orang).
+    
+    Args:
+        header_row: List of header cell values (baris ke-2 spreadsheet).
+    
+    Returns:
+        Dictionary {key: col_index} misal {"title": 2, "date": 1, "sosmed": 3, ...}
+    """
+    columns = {}
+
+    # Cari batas kolom Mahardika: mulai dari col 0, berhenti di kolom kosong kedua
+    # (kolom A biasanya kosong/nomor, jadi skip kolom kosong pertama)
+    found_data = False
+    end_index = len(header_row)
+
+    for i, cell in enumerate(header_row):
+        cell_clean = cell.strip()
+        if cell_clean:
+            found_data = True
+        elif found_data:
+            # Kolom kosong setelah ada data = pemisah antar orang
+            end_index = i
+            break
+
+    # Detect kolom dalam range Mahardika saja
+    for i in range(end_index):
+        cell = header_row[i].strip().lower()
+        if not cell:
+            continue
+
+        # Skip kolom yang diabaikan
+        if cell in IGNORED_COLUMNS:
+            continue
+
+        # Cari match di COLUMN_MAPPINGS
+        for header_key, internal_key in COLUMN_MAPPINGS.items():
+            if header_key in cell and internal_key not in columns:
+                columns[internal_key] = i
+                break
+
+    return columns
+
+
 def extract_hyperlinks(worksheet: gspread.Worksheet, col_index: int) -> dict[int, str]:
     """
     Ekstraksi hyperlink URL dari kolom tertentu.
-    Menggunakan Sheets API untuk mendapatkan hyperlink metadata dan formula HYPERLINK().
-    
-    Args:
-        worksheet: gspread Worksheet object.
-        col_index: Index kolom (0-indexed).
-    
-    Returns:
-        Dictionary {row_number(1-indexed): url} untuk setiap cell yang punya hyperlink.
+    Supports formula HYPERLINK() dan rich-text hyperlinks.
     """
     hyperlinks = {}
-    
-    # Method 1: Cek formula HYPERLINK() di kolom
     col_letter = chr(ord('A') + col_index)
+
+    # Method 1: Formula HYPERLINK()
     try:
         formulas = worksheet.get(
             f"{col_letter}:{col_letter}",
@@ -99,7 +145,6 @@ def extract_hyperlinks(worksheet: gspread.Worksheet, col_index: int) -> dict[int
         for i, row_vals in enumerate(formulas, start=1):
             if row_vals:
                 cell_val = row_vals[0]
-                # Parse "=HYPERLINK("url", "text")" formula
                 match = re.match(
                     r'=HYPERLINK\(\s*"([^"]+)"\s*(?:,\s*"[^"]*")?\s*\)',
                     str(cell_val),
@@ -110,13 +155,8 @@ def extract_hyperlinks(worksheet: gspread.Worksheet, col_index: int) -> dict[int
     except Exception:
         pass
 
-    # Method 2: Gunakan Sheets API langsung untuk mendapatkan rich text hyperlinks
-    # (untuk link yang diset via Insert > Link, bukan formula)
+    # Method 2: Rich-text hyperlinks (Insert > Link)
     try:
-        spreadsheet_id = worksheet.spreadsheet.id
-        sheet_id = worksheet.id
-        
-        # Gunakan internal API client dari gspread
         response = worksheet.spreadsheet.fetch_sheet_metadata(
             params={
                 'includeGridData': True,
@@ -124,7 +164,7 @@ def extract_hyperlinks(worksheet: gspread.Worksheet, col_index: int) -> dict[int
                 'fields': 'sheets.data.rowData.values(hyperlink,formattedValue)'
             }
         )
-        
+
         sheets_data = response.get('sheets', [])
         if sheets_data:
             grid_data = sheets_data[0].get('data', [])
@@ -142,26 +182,10 @@ def extract_hyperlinks(worksheet: gspread.Worksheet, col_index: int) -> dict[int
     return hyperlinks
 
 
-def get_all_rows(sheet_name: str = None) -> list[list[str]]:
-    """
-    Ambil semua baris data dari spreadsheet (skip header rows).
-    
-    Returns:
-        List of rows, dimana setiap row adalah list of string values.
-    """
-    worksheet = _get_worksheet(sheet_name)
-    all_values = worksheet.get_all_values()
-
-    if len(all_values) <= config.HEADER_ROWS:
-        return []
-
-    # Skip header rows
-    return all_values[config.HEADER_ROWS:]
-
-
 def get_task_data(sheet_name: str = None) -> list[dict]:
     """
-    Ambil data task Mahardika dari spreadsheet, termasuk hyperlink dari kolom task title.
+    Ambil data task Mahardika dari spreadsheet.
+    Auto-detect kolom dari header row, extract hyperlinks dari kolom title.
     
     Returns:
         List of dict: [{row_index, title, url, date, sosmed, deadline, result, note}, ...]
@@ -172,8 +196,18 @@ def get_task_data(sheet_name: str = None) -> list[dict]:
     if len(all_values) <= config.HEADER_ROWS:
         return []
 
-    # Ekstraksi hyperlinks dari kolom task title
-    hyperlinks = extract_hyperlinks(worksheet, config.COL_TASK_TITLE)
+    # Auto-detect kolom dari header row (baris ke-2)
+    header_row = all_values[config.HEADER_ROWS - 1]  # 0-indexed
+    columns = detect_columns(header_row)
+
+    title_col = columns.get("title")
+    if title_col is None:
+        raise ValueError(
+            f"Kolom 'Link' (judul task) tidak ditemukan di header: {header_row}"
+        )
+
+    # Ekstraksi hyperlinks dari kolom title
+    hyperlinks = extract_hyperlinks(worksheet, title_col)
 
     tasks = []
     data_rows = all_values[config.HEADER_ROWS:]
@@ -181,10 +215,13 @@ def get_task_data(sheet_name: str = None) -> list[dict]:
     for i, row in enumerate(data_rows):
         row_index = i + config.HEADER_ROWS + 1  # 1-indexed spreadsheet row
 
-        def safe_get(idx, default=""):
+        def safe_get(col_key, default=""):
+            idx = columns.get(col_key)
+            if idx is None:
+                return default
             return row[idx].strip() if len(row) > idx else default
 
-        title = safe_get(config.COL_TASK_TITLE)
+        title = safe_get("title")
 
         # Skip baris tanpa judul task
         if not title:
@@ -194,20 +231,18 @@ def get_task_data(sheet_name: str = None) -> list[dict]:
             "row_index": row_index,
             "title": title,
             "url": hyperlinks.get(row_index, ""),
-            "date": safe_get(config.COL_DATE),
-            "sosmed": safe_get(config.COL_SOSMED),
-            "deadline": safe_get(config.COL_DEADLINE),
-            "result": safe_get(config.COL_RESULT),
-            "note": safe_get(config.COL_NOTE),
+            "date": safe_get("date"),
+            "sosmed": safe_get("sosmed"),
+            "deadline": safe_get("deadline"),
+            "result": safe_get("result"),
+            "note": safe_get("note"),
         })
 
     return tasks
 
 
 def get_unsynced_tasks(sheet_name: str = None) -> list[dict]:
-    """
-    Ambil task yang belum di-sync (kolom Result kosong).
-    """
+    """Ambil task yang belum di-sync (kolom Result kosong)."""
     all_tasks = get_task_data(sheet_name)
     return [t for t in all_tasks if not t["result"]]
 
@@ -215,39 +250,46 @@ def get_unsynced_tasks(sheet_name: str = None) -> list[dict]:
 def update_result(row_index: int, result: str = "Synced", card_url: str = "", sheet_name: str = None) -> None:
     """
     Update kolom Result dan (opsional) tambahkan info card Trello di Note.
-    
-    Args:
-        row_index: Nomor baris di spreadsheet (1-indexed).
-        result: Result text (default: "Synced").
-        card_url: URL card Trello yang dibuat (opsional, ditulis di Note).
+    Auto-detect posisi kolom dari header row.
     """
     worksheet = _get_worksheet(sheet_name)
+    all_values = worksheet.get_all_values()
 
-    # Update kolom Result
-    result_col = config.COL_RESULT + 1  # gspread pakai 1-indexed columns
-    worksheet.update_cell(row_index, result_col, result)
+    if len(all_values) < config.HEADER_ROWS:
+        return
 
-    # Jika ada card_url, simpan di kolom Note
+    header_row = all_values[config.HEADER_ROWS - 1]
+    columns = detect_columns(header_row)
+
+    result_col = columns.get("result")
+    if result_col is not None:
+        worksheet.update_cell(row_index, result_col + 1, result)
+
     if card_url:
-        note_col = config.COL_NOTE + 1
-        existing_note = worksheet.cell(row_index, note_col).value or ""
-        new_note = f"{existing_note}\n{card_url}".strip() if existing_note else card_url
-        worksheet.update_cell(row_index, note_col, new_note)
+        note_col = columns.get("note")
+        if note_col is not None:
+            existing_note = worksheet.cell(row_index, note_col + 1).value or ""
+            new_note = f"{existing_note}\n{card_url}".strip() if existing_note else card_url
+            worksheet.update_cell(row_index, note_col + 1, new_note)
 
 
 def get_header_row(sheet_name: str = None) -> list[str]:
-    """Ambil header row (baris kedua = nama kolom) dari spreadsheet."""
+    """Ambil header row (baris ke-2 = nama kolom) dari spreadsheet."""
     worksheet = _get_worksheet(sheet_name)
-    # Baris ke-2 adalah nama kolom (baris ke-1 adalah nama orang)
     values = worksheet.row_values(config.HEADER_ROWS)
     return values if values else []
+
+
+def get_detected_columns_info(sheet_name: str = None) -> dict[str, int]:
+    """Return info auto-detected columns untuk debugging/display."""
+    header_row = get_header_row(sheet_name)
+    return detect_columns(header_row)
 
 
 def get_month_name_from_sheet(sheet_name: str) -> str:
     """
     Ekstrak nama bulan dari nama sheet.
-    Contoh: "Febuari 2026 " -> "FEBUARI"
-             "April 2026" -> "APRIL"
+    Contoh: "Febuari 2026 " -> "FEBUARI", "April 2026" -> "APRIL"
     """
     parts = sheet_name.strip().split()
     if parts:
