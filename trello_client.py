@@ -167,6 +167,19 @@ def get_board_labels(board_id: str) -> list[dict]:
     return _make_request("GET", f"/boards/{board_id}/labels")
 
 
+def get_cards_in_list(list_id: str) -> list[dict]:
+    """
+    Ambil semua cards dalam sebuah list Trello.
+    
+    Args:
+        list_id: ID list Trello.
+    
+    Returns:
+        List of card dictionaries (berisi id, name, url, dll).
+    """
+    return _make_request("GET", f"/lists/{list_id}/cards")
+
+
 # ── List Operations ───────────────────────────────────────────
 
 def create_list(board_id: str, name: str, pos: str = "top") -> dict:

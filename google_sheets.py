@@ -206,8 +206,10 @@ def get_task_data(sheet_name: str = None) -> list[dict]:
             f"Kolom 'Link' (judul task) tidak ditemukan di header: {header_row}"
         )
 
-    # Ekstraksi hyperlinks dari kolom title
+    # Ekstraksi hyperlinks dari kolom title & note
     hyperlinks = extract_hyperlinks(worksheet, title_col)
+    note_col = columns.get("note")
+    note_hyperlinks = extract_hyperlinks(worksheet, note_col) if note_col is not None else {}
 
     tasks = []
     data_rows = all_values[config.HEADER_ROWS:]
@@ -236,20 +238,27 @@ def get_task_data(sheet_name: str = None) -> list[dict]:
             "deadline": safe_get("deadline"),
             "result": safe_get("result"),
             "note": safe_get("note"),
+            "note_url": note_hyperlinks.get(row_index, ""),
         })
 
     return tasks
 
 
 def get_unsynced_tasks(sheet_name: str = None) -> list[dict]:
-    """Ambil task yang belum di-sync (kolom Result kosong)."""
+    """Ambil task yang belum di-sync (kolom Note belum berisi link trello.com)."""
     all_tasks = get_task_data(sheet_name)
-    return [t for t in all_tasks if not t["result"]]
+    unsynced = []
+    for t in all_tasks:
+        has_trello = "trello.com" in str(t.get("note_url", "")).lower() or "trello.com" in str(t.get("note", "")).lower()
+        if not has_trello:
+            unsynced.append(t)
+    return unsynced
 
 
-def update_result(row_index: int, result: str = "Synced", card_url: str = "", sheet_name: str = None) -> None:
+def update_result(row_index: int, result: str = "", card_url: str = "", card_name: str = "", sheet_name: str = None) -> None:
     """
-    Update kolom Result dan (opsional) tambahkan info card Trello di Note.
+    Update info card Trello di Note sebagai hyperlink.
+    Kolom Result hanya diupdate jika berisi pesan Error.
     Auto-detect posisi kolom dari header row.
     """
     worksheet = _get_worksheet(sheet_name)
@@ -261,16 +270,19 @@ def update_result(row_index: int, result: str = "Synced", card_url: str = "", sh
     header_row = all_values[config.HEADER_ROWS - 1]
     columns = detect_columns(header_row)
 
-    result_col = columns.get("result")
-    if result_col is not None:
-        worksheet.update_cell(row_index, result_col + 1, result)
+    # Hanya update Result jika itu pesan Error agar tidak mereplace status "on-time" punya user
+    if result and "error" in result.lower():
+        result_col = columns.get("result")
+        if result_col is not None:
+            worksheet.update_cell(row_index, result_col + 1, result)
 
     if card_url:
         note_col = columns.get("note")
         if note_col is not None:
-            existing_note = worksheet.cell(row_index, note_col + 1).value or ""
-            new_note = f"{existing_note}\n{card_url}".strip() if existing_note else card_url
-            worksheet.update_cell(row_index, note_col + 1, new_note)
+            # Overwrite the note column with the Trello card URL directly as a HYPERLINK
+            display_text = card_name.replace('"', '""') if card_name else "Trello Card"
+            hyperlink_formula = f'=HYPERLINK("{card_url}", "{display_text}")'
+            worksheet.update_cell(row_index, note_col + 1, hyperlink_formula)
 
 
 def get_header_row(sheet_name: str = None) -> list[str]:

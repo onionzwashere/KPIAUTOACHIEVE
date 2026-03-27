@@ -30,6 +30,7 @@ parser.add_argument("--list-boards", action="store_true", help="Tampilkan semua 
 parser.add_argument("--list-lists", action="store_true", help="Tampilkan semua list di board yang dikonfigurasi")
 parser.add_argument("--check-sheet", action="store_true", help="Cek koneksi ke Google Sheets")
 parser.add_argument("--list-tabs", action="store_true", help="Tampilkan semua tab/sheet yang ada")
+parser.add_argument("--link-existing", action="store_true", help="Cari dan link Trello cards yang sudah ada ke kolom Note")
 
 args = parser.parse_args()
 
@@ -104,10 +105,10 @@ def check_sheet():
         tasks = google_sheets.get_task_data(target_sheet)
         print(f"\n  Total task: {len(tasks)}")
 
-        unsynced = [t for t in tasks if not t["result"]]
-        synced = [t for t in tasks if t["result"]]
+        unsynced = google_sheets.get_unsynced_tasks(target_sheet)
+        unsynced_rows = {t['row_index'] for t in unsynced}
         print(f"  Belum di-sync: {len(unsynced)}")
-        print(f"  Sudah di-sync: {len(synced)}")
+        print(f"  Sudah di-sync: {len(tasks) - len(unsynced)}")
 
         # Generate nama list Trello
         list_name = sync.build_list_name(target_sheet)
@@ -116,7 +117,7 @@ def check_sheet():
         if tasks:
             print(f"\n  Preview task:")
             for t in tasks[:5]:
-                status = f"[{t['result']}]" if t["result"] else "[belum sync]"
+                status = "[belum sync]" if t['row_index'] in unsynced_rows else "[sudah sync]"
                 link_info = f" (link: ada)" if t["url"] else " (link: -)"
                 print(f"    Baris {t['row_index']}: {t['title']}{link_info} {status}")
             if len(tasks) > 5:
@@ -140,9 +141,12 @@ def main():
     elif args.check_sheet:
         check_sheet()
     else:
-        # Run sync
         target_sheet = args.month or config.SHEET_NAME
-        sync.sync_all_unsynced(sheet_name=target_sheet, dry_run=args.dry_run)
+        
+        if args.link_existing:
+            sync.link_existing_tasks(sheet_name=target_sheet, dry_run=args.dry_run)
+        else:
+            sync.sync_all_unsynced(sheet_name=target_sheet, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
